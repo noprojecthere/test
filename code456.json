@@ -1,0 +1,18 @@
+[
+
+  {
+    "tmdb_id": 66732,
+    "title": "cam",
+    "stream_url": "https://dishmt.slivcdn.com/hls/live/2011671-b/SETHD/master.m3u8",
+    "cookie": "hdnea=exp=1769236202~acl=/*~id=204bdacde3827f40d761a2bfdf4abf74-1769193000222~hmac=6ebcb4bec849cd9b44dacfb900b83af4cd0ff6cdb61aaebed617122af8bb6877",
+    "media_type": "tv"
+  },
+  
+  {
+    "tmdb_id": 224372,
+    "title": "ana",
+    "stream_url": "https://f15f16aG1HHmYAsDcnxBWqrEUoEYK1CveL4.mediatailor.ap-south-1.amazonaws.com/v1/master/d367f9b863a7a04827f71ecab4cbeeb11f78a827/RUNTHR/index.m3u8",
+    "media_type": "tv"
+  }
+  
+]
