@@ -32,6 +32,13 @@
     "media_type": "movie",
     "origin": "",
     "cookie": "__hdnea__=st=1769217140~exp=1769303540~acl=/*~hmac=5937cCbXgD8G2ZEBqnNKQWZekmqHSMuagtc6dd8d49b671b99f825a0b09913a33"
+  },
+  
+  {
+    "tmdb_id": 224372,
+    "title": "ana",
+    "stream_url": "https://f15f16aG1HHmYAsDcnxBWqrEUoEYK1CveL4.mediatailor.ap-south-1.amazonaws.com/v1/master/d367f9b863a7a04827f71ecab4cbeeb11f78a827/RUNTHR/index.m3u8",
+    "media_type": "tv"
   }
   
 ]
