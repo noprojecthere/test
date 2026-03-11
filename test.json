@@ -1,0 +1,84 @@
+[
+  {
+    "tmdb_id": 799882,
+    "title": "Movie Name",
+    "media_type": "movie",
+    "streams": [
+      {
+        "label": "Server 1 - 1080p",
+        "url": "https://...",
+        "drm_license": "",
+        "drm_scheme": "",
+        "user_agent": "",
+        "referer": "",
+        "origin": "",
+        "cookie": ""
+      },
+      {
+        "label": "Server 2 - 720p", 
+        "url": "https://..."
+      }
+    ]
+  },
+  {
+    "tmdb_id": 1399,
+    "title": "Web Series",
+    "media_type": "tv",
+    "seasons": [
+      {
+        "season": 1,
+        "label": "Season 1",
+        "episodes": [
+          {
+            "episode": 1,
+            "title": "Episode 1",
+            "streams": [
+              {
+                "label": "Server 1 - 1080p",
+                "url": "https://..."
+              },
+              {
+                "label": "Server 2 - 720p",
+                "url": "https://..."
+              }
+            ]
+          }
+          {
+            "episode": 2,
+            "title": "Episode 2",
+            "streams": [
+              {
+                "label": "Server 1 - 1080p",
+                "url": "https://..."
+              },
+              {
+                "label": "Server 2 - 720p",
+                "url": "https://..."
+              }
+            ]
+          }
+        ]
+      }
+      {
+        "season": 2,
+        "label": "Season 2",
+        "episodes": [
+          {
+            "episode": 1,
+            "title": "Episode 1",
+            "streams": [
+              {
+                "label": "Server 1 - 1080p",
+                "url": "https://..."
+              },
+              {
+                "label": "Server 2 - 720p",
+                "url": "https://..."
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
