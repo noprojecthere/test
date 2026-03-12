@@ -1,0 +1,1235 @@
+dashbord code:-
+const CONFIG = {
+  DASHBOARD_PATH: '/dsjson',
+  API_PREFIX: '/api',
+  PASSWORD: 'niksar01',      // ?? CHANGE THIS!
+  TMDB_API_KEY: '4d28f9c1b85375e5fa73be8f25dba513',
+  TMDB_BASE: 'https://api.themoviedb.org/3',
+  COOKIE_NAME: 'nx_auth',
+  SESSION_HOURS: 24
+};
+
+// ============================================================
+// MAIN ROUTER
+// ============================================================
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    try {
+      // --- JSON Output (Public) ---
+      if (path.startsWith('/j/')) {
+        const code = path.replace('/j/', '').trim();
+        if (code) return await serveJSON(env, code);
+      }
+
+      // --- Dashboard ---
+      if (path === CONFIG.DASHBOARD_PATH) {
+        return handleDashboard(request, url);
+      }
+
+      // --- API Routes (Auth Required) ---
+      if (path.startsWith(CONFIG.API_PREFIX)) {
+        const authCheck = checkAuth(request);
+        if (!authCheck && !path.endsWith('/login')) {
+          return jsonResponse({ error: 'Unauthorized' }, 401);
+        }
+        return await handleAPI(request, url, env);
+      }
+
+      // --- Main URL: Fake Error Page ---
+      return fakeErrorPage();
+
+    } catch (e) {
+      return jsonResponse({ error: 'Internal Server Error' }, 500);
+    }
+  }
+};
+
+// ============================================================
+// FAKE ERROR PAGE (Main URL pe koi ko pata na chale)
+// ============================================================
+
+function fakeErrorPage() {
+  const html = `<!DOCTYPE html>
+<html><head><title>502 Bad Gateway</title>
+<style>body{font-family:Tahoma,Verdana,Arial,sans-serif;background:#f5f5f5;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+.c{text-align:center;background:#fff;padding:40px 60px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.1)}
+h1{font-size:48px;color:#e74c3c;margin:0 0 10px}p{color:#555;font-size:14px}
+</style></head><body><div class="c"><h1>502</h1><p>Bad Gateway</p><p style="color:#999;font-size:12px">The server encountered a temporary error and could not complete your request.</p><hr style="margin:20px 0;border:none;border-top:1px solid #eee"><p style="color:#bbb;font-size:11px">cloudflare</p></div></body></html>`;
+  return new Response(html, {
+    status: 502,
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+// ============================================================
+// AUTH
+// ============================================================
+
+function checkAuth(request) {
+  const cookie = request.headers.get('Cookie') || '';
+  const match = cookie.match(/nx_auth=([^;]+)/);
+  if (!match) return false;
+
+  try {
+    const data = JSON.parse(atob(match[1]));
+    if (data.p === CONFIG.PASSWORD && data.t > Date.now()) return true;
+  } catch (e) {}
+  return false;
+}
+
+function createAuthCookie() {
+  const data = {
+    p: CONFIG.PASSWORD,
+    t: Date.now() + (CONFIG.SESSION_HOURS * 60 * 60 * 1000)
+  };
+  const value = btoa(JSON.stringify(data));
+  return `${CONFIG.COOKIE_NAME}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${CONFIG.SESSION_HOURS * 3600}`;
+}
+
+// ============================================================
+// API HANDLER
+// ============================================================
+
+async function handleAPI(request, url, env) {
+  const path = url.pathname.replace(CONFIG.API_PREFIX, '');
+  const method = request.method;
+
+  // --- Login ---
+  if (path === '/login' && method === 'POST') {
+    const body = await request.json();
+    if (body.password === CONFIG.PASSWORD) {
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Set-Cookie': createAuthCookie()
+        }
+      });
+    }
+    return jsonResponse({ error: 'Wrong password' }, 401);
+  }
+
+  // --- TMDB Search ---
+  if (path === '/tmdb/search' && method === 'GET') {
+    const query = url.searchParams.get('q');
+    if (!query) return jsonResponse({ results: [] });
+
+    const tmdbUrl = `${CONFIG.TMDB_BASE}/search/multi?api_key=${CONFIG.TMDB_API_KEY}&query=${encodeURIComponent(query)}&language=en-US&page=1`;
+    const res = await fetch(tmdbUrl);
+    const data = await res.json();
+
+    const filtered = (data.results || [])
+      .filter(r => r.media_type === 'movie' || r.media_type === 'tv')
+      .slice(0, 10)
+      .map(r => ({
+        tmdb_id: r.id,
+        title: r.title || r.name,
+        media_type: r.media_type,
+        year: (r.release_date || r.first_air_date || '').substring(0, 4),
+        poster: r.poster_path ? `https://image.tmdb.org/t/p/w92${r.poster_path}` : null,
+        overview: (r.overview || '').substring(0, 100)
+      }));
+
+    return jsonResponse({ results: filtered });
+  }
+
+  // --- List all JSON collections ---
+  if (path === '/collections' && method === 'GET') {
+    const list = await env.CINEMA_KV.list({ prefix: 'col:' });
+    const collections = [];
+    for (const key of list.keys) {
+      const code = key.name.replace('col:', '');
+      const meta = await env.CINEMA_KV.get(key.name, 'json');
+      collections.push({ code, ...meta });
+    }
+    return jsonResponse({ collections });
+  }
+
+  // --- Create new collection ---
+  if (path === '/collections' && method === 'POST') {
+    const body = await request.json();
+    const code = body.code || generateCode();
+    const name = body.name || 'Untitled';
+
+    await env.CINEMA_KV.put(`col:${code}`, JSON.stringify({
+      name,
+      created: Date.now(),
+      itemCount: 0
+    }));
+    await env.CINEMA_KV.put(`items:${code}`, JSON.stringify([]));
+
+    return jsonResponse({ success: true, code });
+  }
+
+  // --- Delete collection ---
+  if (path.startsWith('/collections/') && method === 'DELETE') {
+    const code = path.replace('/collections/', '');
+    await env.CINEMA_KV.delete(`col:${code}`);
+    await env.CINEMA_KV.delete(`items:${code}`);
+    return jsonResponse({ success: true });
+  }
+
+  // --- Get items of a collection ---
+  if (path.startsWith('/items/') && method === 'GET') {
+    const code = path.replace('/items/', '');
+    const items = await env.CINEMA_KV.get(`items:${code}`, 'json') || [];
+    return jsonResponse({ items });
+  }
+
+  // --- Save items (full replace) ---
+  if (path.startsWith('/items/') && method === 'PUT') {
+    const code = path.replace('/items/', '');
+    const body = await request.json();
+    const items = body.items || [];
+
+    await env.CINEMA_KV.put(`items:${code}`, JSON.stringify(items));
+
+    // Update meta
+    const meta = await env.CINEMA_KV.get(`col:${code}`, 'json') || {};
+    meta.itemCount = items.length;
+    meta.updated = Date.now();
+    await env.CINEMA_KV.put(`col:${code}`, JSON.stringify(meta));
+
+    return jsonResponse({ success: true, count: items.length });
+  }
+
+  // --- Add single item ---
+  if (path.startsWith('/item/') && method === 'POST') {
+    const code = path.replace('/item/', '');
+    const body = await request.json();
+    const items = await env.CINEMA_KV.get(`items:${code}`, 'json') || [];
+
+    // Check duplicate
+    const exists = items.find(i => i.tmdb_id === body.tmdb_id);
+    if (exists) return jsonResponse({ error: 'Item already exists' }, 400);
+
+    items.push(body);
+    await env.CINEMA_KV.put(`items:${code}`, JSON.stringify(items));
+
+    const meta = await env.CINEMA_KV.get(`col:${code}`, 'json') || {};
+    meta.itemCount = items.length;
+    meta.updated = Date.now();
+    await env.CINEMA_KV.put(`col:${code}`, JSON.stringify(meta));
+
+    return jsonResponse({ success: true, count: items.length });
+  }
+
+  // --- Update single item ---
+  if (path.startsWith('/item/') && method === 'PUT') {
+    const parts = path.replace('/item/', '').split('/');
+    const code = parts[0];
+    const tmdbId = parseInt(parts[1]);
+
+    const body = await request.json();
+    let items = await env.CINEMA_KV.get(`items:${code}`, 'json') || [];
+
+    const index = items.findIndex(i => i.tmdb_id === tmdbId);
+    if (index === -1) return jsonResponse({ error: 'Not found' }, 404);
+
+    items[index] = body;
+    await env.CINEMA_KV.put(`items:${code}`, JSON.stringify(items));
+
+    return jsonResponse({ success: true });
+  }
+
+  // --- Delete single item ---
+  if (path.startsWith('/item/') && method === 'DELETE') {
+    const parts = path.replace('/item/', '').split('/');
+    const code = parts[0];
+    const tmdbId = parseInt(parts[1]);
+
+    let items = await env.CINEMA_KV.get(`items:${code}`, 'json') || [];
+    items = items.filter(i => i.tmdb_id !== tmdbId);
+    await env.CINEMA_KV.put(`items:${code}`, JSON.stringify(items));
+
+    const meta = await env.CINEMA_KV.get(`col:${code}`, 'json') || {};
+    meta.itemCount = items.length;
+    meta.updated = Date.now();
+    await env.CINEMA_KV.put(`col:${code}`, JSON.stringify(meta));
+
+    return jsonResponse({ success: true });
+  }
+
+  // --- Get JSON URL ---
+  if (path.startsWith('/json-url/') && method === 'GET') {
+    const code = path.replace('/json-url/', '');
+    const jsonUrl = `${url.origin}/j/${code}`;
+    return jsonResponse({ url: jsonUrl });
+  }
+
+  return jsonResponse({ error: 'Not found' }, 404);
+}
+
+// ============================================================
+// SERVE JSON (Public - App fetches this)
+// ============================================================
+
+async function serveJSON(env, code) {
+  const items = await env.CINEMA_KV.get(`items:${code}`, 'json');
+  if (!items) return jsonResponse({ error: 'Not found' }, 404);
+
+  return new Response(JSON.stringify(items), {
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=300'
+    }
+  });
+}
+
+// ============================================================
+// DASHBOARD HTML
+// ============================================================
+
+function handleDashboard(request, url) {
+  const isAuthed = checkAuth(request);
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Content Manager</title>
+<style>
+:root{--bg:#0f0f0f;--card:#1a1a1a;--card2:#222;--border:#333;--text:#fff;--text2:#aaa;--accent:#FFD700;--accent2:#FFA500;--danger:#e74c3c;--success:#2ecc71;--radius:12px}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.login-wrap{display:flex;align-items:center;justify-content:center;height:100vh;padding:20px}
+.login-box{background:var(--card);padding:40px;border-radius:var(--radius);width:100%;max-width:380px;text-align:center}
+.login-box h2{color:var(--accent);margin-bottom:24px;font-size:22px}
+.login-box input{width:100%;padding:14px 16px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;margin-bottom:16px;outline:none}
+.login-box input:focus{border-color:var(--accent)}
+.login-box button{width:100%;padding:14px;background:var(--accent);color:#000;border:none;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer}
+.login-box button:hover{background:var(--accent2)}
+.app{display:none;max-width:1200px;margin:0 auto;padding:16px}
+
+/* Header */
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-bottom:1px solid var(--border);margin-bottom:20px;flex-wrap:wrap;gap:10px}
+.header h1{font-size:20px;color:var(--accent)}
+.header-actions{display:flex;gap:8px;flex-wrap:wrap}
+
+/* Buttons */
+.btn{padding:10px 18px;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all 0.2s}
+.btn-primary{background:var(--accent);color:#000}
+.btn-primary:hover{background:var(--accent2)}
+.btn-secondary{background:var(--card2);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{border-color:var(--accent)}
+.btn-danger{background:var(--danger);color:#fff}
+.btn-danger:hover{opacity:0.8}
+.btn-sm{padding:6px 12px;font-size:12px}
+.btn-success{background:var(--success);color:#fff}
+
+/* Collections */
+.collections{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px;margin-bottom:20px}
+.col-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;cursor:pointer;transition:all 0.2s}
+.col-card:hover{border-color:var(--accent);transform:translateY(-2px)}
+.col-card h3{font-size:15px;margin-bottom:6px}
+.col-card .meta{font-size:12px;color:var(--text2)}
+.col-card .actions{display:flex;gap:6px;margin-top:12px}
+
+/* Item Editor */
+.editor{display:none}
+.editor-header{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid var(--border);margin-bottom:16px;flex-wrap:wrap;gap:10px}
+.editor-header h2{font-size:18px}
+
+/* Search */
+.search-box{position:relative;margin-bottom:16px}
+.search-box input{width:100%;padding:14px 16px;background:var(--card);border:1px solid var(--border);border-radius:8px;color:var(--text);font-size:14px;outline:none}
+.search-box input:focus{border-color:var(--accent)}
+.suggestions{position:absolute;top:100%;left:0;right:0;background:var(--card);border:1px solid var(--border);border-radius:0 0 8px 8px;max-height:300px;overflow-y:auto;z-index:100;display:none}
+.sug-item{display:flex;align-items:center;padding:10px 14px;gap:10px;cursor:pointer;border-bottom:1px solid var(--border)}
+.sug-item:hover{background:var(--card2)}
+.sug-item img{width:40px;height:60px;object-fit:cover;border-radius:4px;background:var(--card2)}
+.sug-item .info h4{font-size:13px;margin-bottom:2px}
+.sug-item .info p{font-size:11px;color:var(--text2)}
+
+/* Items List */
+.items-list{display:flex;flex-direction:column;gap:8px}
+.item-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius);padding:14px;display:flex;align-items:center;gap:12px}
+.item-card img{width:50px;height:75px;object-fit:cover;border-radius:6px;background:var(--card2)}
+.item-card .item-info{flex:1;min-width:0}
+.item-card .item-info h4{font-size:14px;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.item-card .item-info .item-meta{font-size:11px;color:var(--text2)}
+.item-card .item-info .item-badges{display:flex;gap:4px;margin-top:4px;flex-wrap:wrap}
+.badge{padding:2px 8px;border-radius:4px;font-size:10px;font-weight:600}
+.badge-movie{background:#1a3a5c;color:#5dade2}
+.badge-tv{background:#1a4a2e;color:#58d68d}
+.badge-streams{background:#4a3a1a;color:var(--accent)}
+.badge-seasons{background:#3a1a4a;color:#bb8fce}
+.item-card .item-actions{display:flex;gap:6px;flex-shrink:0}
+
+/* Modal */
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;align-items:center;justify-content:center;padding:16px}
+.modal-overlay.active{display:flex}
+.modal{background:var(--card);border-radius:var(--radius);width:100%;max-width:700px;max-height:90vh;overflow-y:auto;padding:24px}
+.modal h3{font-size:17px;margin-bottom:16px;color:var(--accent)}
+.form-group{margin-bottom:14px}
+.form-group label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px;font-weight:600}
+.form-group input,.form-group select,.form-group textarea{width:100%;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;outline:none}
+.form-group input:focus,.form-group select:focus{border-color:var(--accent)}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+
+/* Stream/Server Box */
+.stream-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;position:relative}
+.stream-box .stream-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.stream-box .stream-num{background:var(--accent);color:#000;width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700}
+.remove-btn{background:none;border:none;color:var(--danger);cursor:pointer;font-size:18px;padding:4px}
+
+/* Season/Episode */
+.season-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px}
+.season-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.episode-box{background:var(--card2);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:6px;margin-left:16px}
+.episode-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+
+/* Toggle */
+.toggle-row{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.toggle{width:44px;height:24px;background:var(--border);border-radius:12px;position:relative;cursor:pointer;transition:0.3s}
+.toggle.active{background:var(--accent)}
+.toggle::after{content:'';width:20px;height:20px;background:#fff;border-radius:50%;position:absolute;top:2px;left:2px;transition:0.3s}
+.toggle.active::after{left:22px}
+
+/* Copy Box */
+.copy-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:monospace;font-size:12px;word-break:break-all;color:var(--accent);margin:10px 0;position:relative;cursor:pointer}
+.copy-box:hover{border-color:var(--accent)}
+.copied-toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:var(--success);color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;z-index:9999;display:none}
+
+/* Responsive */
+@media(max-width:600px){
+  .form-row{grid-template-columns:1fr}
+  .item-card{flex-wrap:wrap}
+  .header{flex-direction:column;align-items:flex-start}
+  .collections{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div class="login-wrap" id="loginWrap">
+  <div class="login-box">
+    <h2>?? Content Manager</h2>
+    <input type="password" id="passInput" placeholder="Enter password" onkeypress="if(event.key==='Enter')doLogin()">
+    <button onclick="doLogin()">Login</button>
+    <p id="loginError" style="color:var(--danger);margin-top:12px;font-size:12px;display:none"></p>
+  </div>
+</div>
+
+<!-- APP -->
+<div class="app" id="app">
+  <!-- Header -->
+  <div class="header">
+    <h1>?? Content Manager</h1>
+    <div class="header-actions">
+      <button class="btn btn-primary" onclick="showNewCollection()">+ New Collection</button>
+    </div>
+  </div>
+
+  <!-- Collections List -->
+  <div id="collectionsView">
+    <div class="collections" id="collectionsList"></div>
+  </div>
+
+  <!-- Item Editor (Hidden) -->
+  <div class="editor" id="editorView">
+    <div class="editor-header">
+      <div>
+        <h2 id="editorTitle">Collection</h2>
+        <p style="font-size:12px;color:var(--text2)" id="editorMeta"></p>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="showJsonUrl()">?? JSON URL</button>
+        <button class="btn btn-secondary btn-sm" onclick="copyJsonData()">?? Copy JSON</button>
+        <button class="btn btn-primary btn-sm" onclick="showAddItem()">+ Add Item</button>
+        <button class="btn btn-secondary btn-sm" onclick="backToCollections()">? Back</button>
+      </div>
+    </div>
+
+    <!-- Search to Add -->
+    <div class="search-box" id="searchBox" style="display:none">
+      <input type="text" id="tmdbSearch" placeholder="?? Search movies or TV shows..." oninput="debounceSearch()">
+      <div class="suggestions" id="suggestions"></div>
+    </div>
+
+    <!-- Items -->
+    <div class="items-list" id="itemsList"></div>
+  </div>
+</div>
+
+<!-- ADD/EDIT ITEM MODAL -->
+<div class="modal-overlay" id="itemModal">
+  <div class="modal">
+    <h3 id="modalTitle">Add Item</h3>
+
+    <!-- Basic Info -->
+    <div class="form-row">
+      <div class="form-group">
+        <label>TMDB ID *</label>
+        <input type="number" id="fTmdbId" placeholder="e.g. 123456">
+      </div>
+      <div class="form-group">
+        <label>Title</label>
+        <input type="text" id="fTitle" placeholder="Movie/Show name">
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Media Type</label>
+      <select id="fMediaType" onchange="toggleMediaType()">
+        <option value="movie">?? Movie</option>
+        <option value="tv">?? TV Series</option>
+      </select>
+    </div>
+
+    <!-- MOVIE: Streams -->
+    <div id="movieStreamsSection">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:16px 0 10px">
+        <label style="font-size:13px;font-weight:600;color:var(--accent)">?? Servers / Streams</label>
+        <button class="btn btn-sm btn-secondary" onclick="addStream()">+ Add Server</button>
+      </div>
+      <div id="streamsContainer"></div>
+    </div>
+
+    <!-- TV: Seasons -->
+    <div id="tvSeasonsSection" style="display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:16px 0 10px">
+        <label style="font-size:13px;font-weight:600;color:var(--accent)">?? Seasons & Episodes</label>
+        <button class="btn btn-sm btn-secondary" onclick="addSeason()">+ Add Season</button>
+      </div>
+      <div id="seasonsContainer"></div>
+    </div>
+
+    <!-- Actions -->
+    <div style="display:flex;gap:10px;margin-top:20px;justify-content:flex-end">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="btnSaveItem" onclick="saveItem()">Save Item</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Collection Modal -->
+<div class="modal-overlay" id="newColModal">
+  <div class="modal" style="max-width:400px">
+    <h3>New Collection</h3>
+    <div class="form-group">
+      <label>Name</label>
+      <input type="text" id="newColName" placeholder="e.g. My Movies">
+    </div>
+    <div class="form-group">
+      <label>Code (optional, auto-generated if empty)</label>
+      <input type="text" id="newColCode" placeholder="e.g. mymovies">
+    </div>
+    <div style="display:flex;gap:10px;margin-top:16px;justify-content:flex-end">
+      <button class="btn btn-secondary" onclick="closeNewCol()">Cancel</button>
+      <button class="btn btn-primary" onclick="createCollection()">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- JSON URL Modal -->
+<div class="modal-overlay" id="jsonUrlModal">
+  <div class="modal" style="max-width:500px">
+    <h3>?? JSON URL</h3>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:12px">Use this URL in your Firebase plugin config:</p>
+    <div class="copy-box" id="jsonUrlBox" onclick="copyJsonUrl()">Loading...</div>
+    <p style="font-size:11px;color:var(--text2);margin-top:8px">Click to copy</p>
+    <div style="margin-top:16px;text-align:right">
+      <button class="btn btn-secondary" onclick="document.getElementById('jsonUrlModal').classList.remove('active')">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Copied Toast -->
+<div class="copied-toast" id="copiedToast">? Copied!</div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+let currentCollection = null;
+let currentItems = [];
+let editingIndex = -1;
+let searchTimeout = null;
+const BASE = '';
+
+// ============================================================
+// LOGIN
+// ============================================================
+${isAuthed ? `
+document.getElementById('loginWrap').style.display='none';
+document.getElementById('app').style.display='block';
+loadCollections();
+` : `
+document.getElementById('loginWrap').style.display='flex';
+document.getElementById('app').style.display='none';
+`}
+
+async function doLogin(){
+  const pass = document.getElementById('passInput').value;
+  const err = document.getElementById('loginError');
+  try{
+    const res = await fetch(BASE+'/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:pass})});
+    if(res.ok){location.reload()}
+    else{err.textContent='Wrong password';err.style.display='block'}
+  }catch(e){err.textContent='Connection error';err.style.display='block'}
+}
+
+// ============================================================
+// COLLECTIONS
+// ============================================================
+async function loadCollections(){
+  const res = await fetch(BASE+'/api/collections');
+  const data = await res.json();
+  renderCollections(data.collections||[]);
+}
+
+function renderCollections(cols){
+  const el = document.getElementById('collectionsList');
+  if(!cols.length){el.innerHTML='<p style="color:var(--text2);padding:40px;text-align:center">No collections yet. Create one!</p>';return}
+  el.innerHTML = cols.map(c=>\`
+    <div class="col-card" onclick="openCollection('\${c.code}','\${c.name}')">
+      <h3>\${c.name}</h3>
+      <div class="meta">\${c.itemCount||0} items • Code: \${c.code}</div>
+      <div class="actions" onclick="event.stopPropagation()">
+        <button class="btn btn-sm btn-secondary" onclick="showJsonUrlFor('\${c.code}')">?? URL</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteCollection('\${c.code}')">???</button>
+      </div>
+    </div>
+  \`).join('');
+}
+
+function showNewCollection(){document.getElementById('newColModal').classList.add('active')}
+function closeNewCol(){document.getElementById('newColModal').classList.remove('active')}
+
+async function createCollection(){
+  const name=document.getElementById('newColName').value.trim();
+  const code=document.getElementById('newColCode').value.trim();
+  if(!name){alert('Enter name');return}
+  await fetch(BASE+'/api/collections',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,code:code||undefined})});
+  closeNewCol();
+  document.getElementById('newColName').value='';
+  document.getElementById('newColCode').value='';
+  loadCollections();
+}
+
+async function deleteCollection(code){
+  if(!confirm('Delete this collection?'))return;
+  await fetch(BASE+'/api/collections/'+code,{method:'DELETE'});
+  loadCollections();
+}
+
+// ============================================================
+// EDITOR
+// ============================================================
+async function openCollection(code,name){
+  currentCollection=code;
+  document.getElementById('collectionsView').style.display='none';
+  document.getElementById('editorView').style.display='block';
+  document.getElementById('editorTitle').textContent=name;
+  await loadItems();
+}
+
+function backToCollections(){
+  document.getElementById('collectionsView').style.display='block';
+  document.getElementById('editorView').style.display='none';
+  currentCollection=null;
+  loadCollections();
+}
+
+async function loadItems(){
+  const res=await fetch(BASE+'/api/items/'+currentCollection);
+  const data=await res.json();
+  currentItems=data.items||[];
+  renderItems();
+  document.getElementById('editorMeta').textContent=currentItems.length+' items • Code: '+currentCollection;
+}
+
+function renderItems(){
+  const el=document.getElementById('itemsList');
+  if(!currentItems.length){el.innerHTML='<p style="color:var(--text2);text-align:center;padding:40px">No items. Add one!</p>';return}
+  el.innerHTML=currentItems.map((item,i)=>{
+    const poster=item.poster||'';
+    const type=item.media_type||'movie';
+    const streamCount=item.streams?item.streams.length:(item.stream_url?1:0);
+    const seasonCount=item.seasons?item.seasons.length:0;
+    let badges='<span class="badge '+(type==='tv'?'badge-tv':'badge-movie')+'">'+(type==='tv'?'TV':'Movie')+'</span>';
+    if(streamCount)badges+='<span class="badge badge-streams">'+streamCount+' server'+(streamCount>1?'s':'')+'</span>';
+    if(seasonCount)badges+='<span class="badge badge-seasons">'+seasonCount+' season'+(seasonCount>1?'s':'')+'</span>';
+    return \`<div class="item-card">
+      \${poster?'<img src="'+poster+'" onerror="this.style.display=\\'none\\'">':''}
+      <div class="item-info">
+        <h4>\${item.title||'Unknown'}</h4>
+        <div class="item-meta">TMDB: \${item.tmdb_id} \${item.year?' • '+item.year:''}</div>
+        <div class="item-badges">\${badges}</div>
+      </div>
+      <div class="item-actions">
+        <button class="btn btn-sm btn-secondary" onclick="editItem(\${i})">??</button>
+        <button class="btn btn-sm btn-danger" onclick="deleteItem(\${i})">???</button>
+      </div>
+    </div>\`;
+  }).join('');
+}
+
+// ============================================================
+// ADD/EDIT ITEM
+// ============================================================
+function showAddItem(){
+  document.getElementById('searchBox').style.display='block';
+  document.getElementById('tmdbSearch').focus();
+}
+
+function openItemModal(isEdit){
+  editingIndex=isEdit?editingIndex:-1;
+  document.getElementById('modalTitle').textContent=isEdit?'Edit Item':'Add Item';
+  document.getElementById('itemModal').classList.add('active');
+  toggleMediaType();
+  if(!isEdit){addStream()}
+}
+
+function closeModal(){
+  document.getElementById('itemModal').classList.remove('active');
+  document.getElementById('searchBox').style.display='none';
+  document.getElementById('suggestions').style.display='none';
+  document.getElementById('tmdbSearch').value='';
+  clearForm();
+}
+
+function clearForm(){
+  document.getElementById('fTmdbId').value='';
+  document.getElementById('fTitle').value='';
+  document.getElementById('fMediaType').value='movie';
+  document.getElementById('streamsContainer').innerHTML='';
+  document.getElementById('seasonsContainer').innerHTML='';
+  editingIndex=-1;
+}
+
+function toggleMediaType(){
+  const type=document.getElementById('fMediaType').value;
+  document.getElementById('movieStreamsSection').style.display=type==='movie'?'block':'none';
+  document.getElementById('tvSeasonsSection').style.display=type==='tv'?'block':'none';
+}
+
+// ============================================================
+// TMDB SEARCH
+// ============================================================
+function debounceSearch(){
+  clearTimeout(searchTimeout);
+  searchTimeout=setTimeout(doTmdbSearch,400);
+}
+
+async function doTmdbSearch(){
+  const q=document.getElementById('tmdbSearch').value.trim();
+  const sug=document.getElementById('suggestions');
+  if(q.length<2){sug.style.display='none';return}
+
+  const res=await fetch(BASE+'/api/tmdb/search?q='+encodeURIComponent(q));
+  const data=await res.json();
+  const results=data.results||[];
+
+  if(!results.length){sug.innerHTML='<div style="padding:16px;color:var(--text2);text-align:center">No results</div>';sug.style.display='block';return}
+
+  sug.innerHTML=results.map(r=>\`
+    <div class="sug-item" onclick='selectSuggestion(\${JSON.stringify(r).replace(/'/g,"&apos;")})'>
+      <img src="\${r.poster||''}" onerror="this.src='data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2260%22><rect fill=%22%23333%22 width=%2240%22 height=%2260%22/></svg>'">
+      <div class="info">
+        <h4>\${r.title} \${r.year?'('+r.year+')':''}</h4>
+        <p>\${r.media_type==='tv'?'?? TV':'?? Movie'} • ID: \${r.tmdb_id}</p>
+      </div>
+    </div>
+  \`).join('');
+  sug.style.display='block';
+}
+
+function selectSuggestion(r){
+  document.getElementById('suggestions').style.display='none';
+  document.getElementById('tmdbSearch').value='';
+  document.getElementById('searchBox').style.display='none';
+
+  clearForm();
+  document.getElementById('fTmdbId').value=r.tmdb_id;
+  document.getElementById('fTitle').value=r.title;
+  document.getElementById('fMediaType').value=r.media_type;
+
+  // Store poster for later
+  document.getElementById('fTmdbId').dataset.poster=r.poster||'';
+  document.getElementById('fTmdbId').dataset.year=r.year||'';
+
+  openItemModal(false);
+}
+
+// ============================================================
+// STREAMS (Servers)
+// ============================================================
+function addStream(data){
+  const container=document.getElementById('streamsContainer');
+  const idx=container.children.length;
+  const d=data||{};
+  const html=\`<div class="stream-box">
+    <div class="stream-header">
+      <span class="stream-num">\${idx+1}</span>
+      <button class="remove-btn" onclick="this.closest('.stream-box').remove();reindexStreams()">?</button>
+    </div>
+    <div class="form-group"><label>Label</label><input type="text" class="sLabel" value="\${d.label||''}" placeholder="e.g. Server 1 - 1080p"></div>
+    <div class="form-group"><label>Stream URL *</label><input type="text" class="sUrl" value="\${d.url||''}" placeholder="https://..."></div>
+    <div class="form-row">
+      <div class="form-group"><label>DRM License URL</label><input type="text" class="sDrm" value="\${d.drm_license||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>DRM Scheme</label>
+        <select class="sDrmScheme"><option value="">None</option><option value="widevine" \${d.drm_scheme==='widevine'?'selected':''}>Widevine</option><option value="playready" \${d.drm_scheme==='playready'?'selected':''}>PlayReady</option><option value="clearkey" \${d.drm_scheme==='clearkey'?'selected':''}>ClearKey</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>User Agent</label><input type="text" class="sUa" value="\${d.user_agent||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>Referer</label><input type="text" class="sRef" value="\${d.referer||''}" placeholder="Optional"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Origin</label><input type="text" class="sOrigin" value="\${d.origin||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>Cookie</label><input type="text" class="sCookie" value="\${d.cookie||''}" placeholder="Optional"></div>
+    </div>
+  </div>\`;
+  container.insertAdjacentHTML('beforeend',html);
+}
+
+function reindexStreams(){
+  document.querySelectorAll('#streamsContainer .stream-num').forEach((el,i)=>el.textContent=i+1);
+}
+
+function getStreams(){
+  const streams=[];
+  document.querySelectorAll('#streamsContainer .stream-box').forEach(box=>{
+    const url=box.querySelector('.sUrl').value.trim();
+    if(!url)return;
+    const s={url};
+    const label=box.querySelector('.sLabel').value.trim();if(label)s.label=label;
+    const drm=box.querySelector('.sDrm').value.trim();if(drm)s.drm_license=drm;
+    const scheme=box.querySelector('.sDrmScheme').value;if(scheme)s.drm_scheme=scheme;
+    const ua=box.querySelector('.sUa').value.trim();if(ua)s.user_agent=ua;
+    const ref=box.querySelector('.sRef').value.trim();if(ref)s.referer=ref;
+    const origin=box.querySelector('.sOrigin').value.trim();if(origin)s.origin=origin;
+    const cookie=box.querySelector('.sCookie').value.trim();if(cookie)s.cookie=cookie;
+    streams.push(s);
+  });
+  return streams;
+}
+
+// ============================================================
+// SEASONS & EPISODES
+// ============================================================
+function addSeason(data){
+  const container=document.getElementById('seasonsContainer');
+  const sIdx=container.children.length+1;
+  const d=data||{};
+  const html=\`<div class="season-box" data-season="\${sIdx}">
+    <div class="season-header">
+      <span style="font-weight:700;color:var(--accent)">Season \${d.season||sIdx}</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-secondary" onclick="addEpisode(this.closest('.season-box'))">+ Episode</button>
+        <button class="remove-btn" onclick="this.closest('.season-box').remove()">?</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Season Number</label><input type="number" class="seasonNum" value="\${d.season||sIdx}"></div>
+      <div class="form-group"><label>Label</label><input type="text" class="seasonLabel" value="\${d.label||''}" placeholder="e.g. Season 1"></div>
+    </div>
+    <div class="episodes-container"></div>
+  </div>\`;
+  container.insertAdjacentHTML('beforeend',html);
+
+  // Add episodes if data exists
+  if(d.episodes&&d.episodes.length){
+    const seasonBox=container.lastElementChild;
+    d.episodes.forEach(ep=>addEpisode(seasonBox,ep));
+  }
+}
+
+function addEpisode(seasonBox,data){
+  const container=seasonBox.querySelector('.episodes-container');
+  const eIdx=container.children.length+1;
+  const d=data||{};
+  const html=\`<div class="episode-box">
+    <div class="episode-header">
+      <span style="font-size:12px;font-weight:600;color:var(--text2)">Episode \${d.episode||eIdx}</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-sm btn-secondary" style="font-size:10px;padding:3px 8px" onclick="addEpStream(this.closest('.episode-box'))">+ Server</button>
+        <button class="remove-btn" style="font-size:14px" onclick="this.closest('.episode-box').remove()">?</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Episode #</label><input type="number" class="epNum" value="\${d.episode||eIdx}"></div>
+      <div class="form-group"><label>Title</label><input type="text" class="epTitle" value="\${d.title||''}" placeholder="Episode title"></div>
+    </div>
+    <div class="ep-streams-container"></div>
+  </div>\`;
+  container.insertAdjacentHTML('beforeend',html);
+
+  // Add streams
+  const epBox=container.lastElementChild;
+  if(d.streams&&d.streams.length){
+    d.streams.forEach(s=>addEpStream(epBox,s));
+  }else if(d.url){
+    addEpStream(epBox,{url:d.url,label:'Default',drm_license:d.drm_license,drm_scheme:d.drm_scheme,user_agent:d.user_agent,referer:d.referer,origin:d.origin,cookie:d.cookie});
+  }else{
+    addEpStream(epBox);
+  }
+}
+
+function addEpStream(epBox,data){
+  const container=epBox.querySelector('.ep-streams-container');
+  const idx=container.children.length;
+  const d=data||{};
+  const html=\`<div class="stream-box" style="margin-left:0;margin-top:6px">
+    <div class="stream-header">
+      <span class="stream-num" style="width:20px;height:20px;font-size:10px">\${idx+1}</span>
+      <button class="remove-btn" style="font-size:14px" onclick="this.closest('.stream-box').remove()">?</button>
+    </div>
+    <div class="form-group"><label>Label</label><input type="text" class="sLabel" value="\${d.label||''}" placeholder="Server name"></div>
+    <div class="form-group"><label>URL *</label><input type="text" class="sUrl" value="\${d.url||''}" placeholder="https://..."></div>
+    <div class="form-row">
+      <div class="form-group"><label>DRM License</label><input type="text" class="sDrm" value="\${d.drm_license||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>DRM Scheme</label>
+        <select class="sDrmScheme"><option value="">None</option><option value="widevine" \${d.drm_scheme==='widevine'?'selected':''}>Widevine</option><option value="playready" \${d.drm_scheme==='playready'?'selected':''}>PlayReady</option><option value="clearkey" \${d.drm_scheme==='clearkey'?'selected':''}>ClearKey</option></select>
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>User Agent</label><input type="text" class="sUa" value="\${d.user_agent||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>Referer</label><input type="text" class="sRef" value="\${d.referer||''}" placeholder="Optional"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>Origin</label><input type="text" class="sOrigin" value="\${d.origin||''}" placeholder="Optional"></div>
+      <div class="form-group"><label>Cookie</label><input type="text" class="sCookie" value="\${d.cookie||''}" placeholder="Optional"></div>
+    </div>
+  </div>\`;
+  container.insertAdjacentHTML('beforeend',html);
+}
+
+function getSeasons(){
+  const seasons=[];
+  document.querySelectorAll('#seasonsContainer .season-box').forEach(sBox=>{
+    const season={
+      season:parseInt(sBox.querySelector('.seasonNum').value)||1,
+      label:sBox.querySelector('.seasonLabel').value.trim()||undefined
+    };
+    const episodes=[];
+    sBox.querySelectorAll('.episode-box').forEach(eBox=>{
+      const ep={
+        episode:parseInt(eBox.querySelector('.epNum').value)||1,
+        title:eBox.querySelector('.epTitle').value.trim()||undefined
+      };
+      const streams=[];
+      eBox.querySelectorAll('.ep-streams-container .stream-box').forEach(box=>{
+        const url=box.querySelector('.sUrl').value.trim();
+        if(!url)return;
+        const s={url};
+        const label=box.querySelector('.sLabel').value.trim();if(label)s.label=label;
+        const drm=box.querySelector('.sDrm').value.trim();if(drm)s.drm_license=drm;
+        const scheme=box.querySelector('.sDrmScheme').value;if(scheme)s.drm_scheme=scheme;
+        const ua=box.querySelector('.sUa').value.trim();if(ua)s.user_agent=ua;
+        const ref=box.querySelector('.sRef').value.trim();if(ref)s.referer=ref;
+        const origin=box.querySelector('.sOrigin').value.trim();if(origin)s.origin=origin;
+        const cookie=box.querySelector('.sCookie').value.trim();if(cookie)s.cookie=cookie;
+        streams.push(s);
+      });
+      if(streams.length)ep.streams=streams;
+      episodes.push(ep);
+    });
+    season.episodes=episodes;
+    seasons.push(season);
+  });
+  return seasons;
+}
+
+// ============================================================
+// SAVE ITEM
+// ============================================================
+async function saveItem(){
+  const tmdbId=parseInt(document.getElementById('fTmdbId').value);
+  const title=document.getElementById('fTitle').value.trim();
+  const mediaType=document.getElementById('fMediaType').value;
+
+  if(!tmdbId){alert('TMDB ID required');return}
+
+  const item={tmdb_id:tmdbId,title:title||'Unknown',media_type:mediaType};
+
+  // Poster & Year from search
+  const poster=document.getElementById('fTmdbId').dataset.poster;
+  const year=document.getElementById('fTmdbId').dataset.year;
+  if(poster)item.poster=poster;
+  if(year)item.year=year;
+
+  if(mediaType==='movie'){
+    const streams=getStreams();
+    if(streams.length===1){
+      // Single stream - use flat format for backward compatibility
+      Object.assign(item,{stream_url:streams[0].url});
+      if(streams[0].label)item.label=streams[0].label;
+      if(streams[0].drm_license)item.drm_license=streams[0].drm_license;
+      if(streams[0].drm_scheme)item.drm_scheme=streams[0].drm_scheme;
+      if(streams[0].user_agent)item.user_agent=streams[0].user_agent;
+      if(streams[0].referer)item.referer=streams[0].referer;
+      if(streams[0].origin)item.origin=streams[0].origin;
+      if(streams[0].cookie)item.cookie=streams[0].cookie;
+    }else if(streams.length>1){
+      item.streams=streams;
+      // Also set first stream as default
+      item.stream_url=streams[0].url;
+    }
+  }else{
+    // TV
+    const seasons=getSeasons();
+    if(seasons.length)item.seasons=seasons;
+    // Also check for direct streams (if TV has movie-style streams too)
+    const streams=getStreams();
+    if(streams.length)item.streams=streams;
+  }
+
+  // Save
+  try{
+    if(editingIndex>=0){
+      // Update
+      currentItems[editingIndex]=item;
+      await fetch(BASE+'/api/items/'+currentCollection,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:currentItems})});
+    }else{
+      // Check duplicate
+      if(currentItems.find(i=>i.tmdb_id===tmdbId)){
+        alert('Item with this TMDB ID already exists!');return;
+      }
+      currentItems.push(item);
+      await fetch(BASE+'/api/items/'+currentCollection,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:currentItems})});
+    }
+    closeModal();
+    renderItems();
+    document.getElementById('editorMeta').textContent=currentItems.length+' items • Code: '+currentCollection;
+    showToast('? Saved!');
+  }catch(e){alert('Save failed: '+e.message)}
+}
+
+// ============================================================
+// EDIT ITEM
+// ============================================================
+function editItem(index){
+  const item=currentItems[index];
+  if(!item)return;
+
+  clearForm();
+  editingIndex=index;
+
+  document.getElementById('fTmdbId').value=item.tmdb_id;
+  document.getElementById('fTitle').value=item.title||'';
+  document.getElementById('fMediaType').value=item.media_type||'movie';
+  document.getElementById('fTmdbId').dataset.poster=item.poster||'';
+  document.getElementById('fTmdbId').dataset.year=item.year||'';
+
+  toggleMediaType();
+
+  if(item.media_type==='tv'&&item.seasons){
+    item.seasons.forEach(s=>addSeason(s));
+  }
+
+  // Streams
+  if(item.streams){
+    item.streams.forEach(s=>addStream(s));
+  }else if(item.stream_url){
+    addStream({url:item.stream_url,label:item.label,drm_license:item.drm_license,drm_scheme:item.drm_scheme,user_agent:item.user_agent,referer:item.referer,origin:item.origin,cookie:item.cookie});
+  }
+
+  openItemModal(true);
+}
+
+// ============================================================
+// DELETE ITEM
+// ============================================================
+async function deleteItem(index){
+  if(!confirm('Delete "'+currentItems[index].title+'"?'))return;
+  currentItems.splice(index,1);
+  await fetch(BASE+'/api/items/'+currentCollection,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:currentItems})});
+  renderItems();
+  document.getElementById('editorMeta').textContent=currentItems.length+' items • Code: '+currentCollection;
+  showToast('??? Deleted!');
+}
+
+// ============================================================
+// JSON URL & COPY
+// ============================================================
+function showJsonUrl(){
+  const url=location.origin+'/j/'+currentCollection;
+  document.getElementById('jsonUrlBox').textContent=url;
+  document.getElementById('jsonUrlModal').classList.add('active');
+}
+
+function showJsonUrlFor(code){
+  const url=location.origin+'/j/'+code;
+  document.getElementById('jsonUrlBox').textContent=url;
+  document.getElementById('jsonUrlModal').classList.add('active');
+}
+
+function copyJsonUrl(){
+  const url=document.getElementById('jsonUrlBox').textContent;
+  navigator.clipboard.writeText(url);
+  showToast('?? URL Copied!');
+}
+
+async function copyJsonData(){
+  // Generate clean JSON (remove poster/year helper fields)
+  const clean=currentItems.map(item=>{
+    const c={...item};
+    delete c.poster;
+    delete c.year;
+    delete c.label;
+    return c;
+  });
+  const json=JSON.stringify(clean,null,2);
+  await navigator.clipboard.writeText(json);
+  showToast('?? JSON Copied! ('+clean.length+' items)');
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+function showToast(msg){
+  const t=document.getElementById('copiedToast');
+  t.textContent=msg;
+  t.style.display='block';
+  setTimeout(()=>t.style.display='none',2000);
+}
+
+function generateCode(){return Math.random().toString(36).substring(2,8)}
+</script>
+</body></html>`;
+
+  return new Response(html, {
+    headers: { 'Content-Type': 'text/html' }
+  });
+}
+
+// ============================================================
+// HELPERS
+// ============================================================
+
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { 'Content-Type': 'application/json' }
+  });
+}
+
+function generateCode() {
+  return Math.random().toString(36).substring(2, 8);
+}
+
+json formate example:-
+[
+  {
+    "tmdb_id": 1262547,
+    "title": "Subedaar",
+    "media_type": "movie",
+    "streams": [
+      {
+        "url": "https://istreamcdn.com/mcdn/MBlock.php?id=10004003621569",
+        "label": "4K Hindi",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      {
+        "url": "https://istreamcdn.com/mcdn/MBlock.php?id=10004003621569",
+        "label": "4k without UA"
+      }
+    ],
+    "stream_url": "https://istreamcdn.com/mcdn/MBlock.php?id=10004003621569"
+  },
+  {
+    "tmdb_id": 111110,
+    "title": "ONE PIECE",
+    "media_type": "tv",
+    "seasons": [
+      {
+        "season": 1,
+        "label": "Season1",
+        "episodes": [
+          {
+            "episode": 1,
+            "title": "ROMANCE DAWN",
+            "streams": [
+              {
+                "url": "https://api.x7flix.com/hls.php?m3u=2/20ba66f905957b34253d9d7abde919f3/master.txt?s=1&cache=1",
+                "label": "Server1",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "referer": "https://molop.art/"
+              }
+            ]
+          },
+          {
+            "episode": 2,
+            "title": "THE MAN IN THE STRAW HAT",
+            "streams": [
+              {
+                "url": "https://api.x7flix.com/hls.php?m3u=2/e19q4npH8vQHNbh7JbL6WNPCZTZC1Ci6F98/master.txt?s=1&cache=1",
+                "label": "4k",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "referer": "https://molop.art/"
+              },
+              {
+                "url": "https://api.x7flix.com/hls.php?m3u=2/e19q4npH8vQHNbh7JbL6WNPCZTZC1Ci6F98/master.txt?s=1&cache=1",
+                "label": "4k ep3",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "referer": "https://molop.art/"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "season": 2,
+        "label": "Season2",
+        "episodes": [
+          {
+            "episode": 1,
+            "title": "Episode 1",
+            "streams": [
+              {
+                "url": "https://api.x7flix.com/hls.php?m3u=2/e19q4npH8vQHNbh7JbL6WNPCZTZC1Ci6F98/master.txt?s=1&cache=1",
+                "label": "Server1",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "referer": "https://molop.art/"
+              },
+              {
+                "url": "https://iasbase.net/mcdn/mFlare.php?id=12820966607553",
+                "label": "Is",
+                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+              }
+            ]
+          },
+          {
+            "episode": 2,
+            "title": "Ep2"
+          },
+          {
+            "episode": 3,
+            "title": "Ep3"
+          },
+          {
+            "episode": 4,
+            "title": "Ep4"
+          },
+          {
+            "episode": 5,
+            "title": "Ep5"
+          }
+        ]
+      },
+      {
+        "season": 3,
+        "label": "Season3",
+        "episodes": []
+      },
+      {
+        "season": 4,
+        "label": "Season4",
+        "episodes": []
+      },
+      {
+        "season": 5,
+        "label": "Season5",
+        "episodes": []
+      }
+    ]
+  }
+]
